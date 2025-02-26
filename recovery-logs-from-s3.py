@@ -101,17 +101,24 @@ while current_time <= end_time:
 
     log(f"Checking for: s3://{BUCKET_NAME}/{object_key}")
     try:
-        response = s3_client.head_object(Bucket=BUCKET_NAME, Key=object_key)
+        s3_client.head_object(Bucket=BUCKET_NAME, Key=object_key)
     except ClientError as e:
-        if e.response['Error']['Code'] == 'NoSuchKey':
-            log(f"File not found in Wasabi: {object_key}")
+        if e.response['Error']['Code'] == '404' or e.response['Error']['Code'] == 'NoSuchKey':
+            log(f"File not found in S3: {object_key}")
         else:
             log(f"Error accessing {object_key}: {str(e)}")
         current_time += timedelta(days=1)
         continue
 
+    try:
+        get_resp = s3_client.get_object(Bucket=BUCKET_NAME, Key=object_key)
+    except ClientError as e:
+        log(f"Error downloading {object_key}: {str(e)}")
+        current_time += timedelta(days=1)
+        continue
+
     daily_alerts = 0
-    compressed_alerts = gzip.GzipFile(fileobj=response['Body'])
+    compressed_alerts = gzip.GzipFile(fileobj=get_resp['Body'])
     log(f"Reading file from S3: {object_key}")
 
     with compressed_alerts:
