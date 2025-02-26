@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # To RUN:
-# nohup ./recover-logs-from-wazuh.py -eps 10000 -min 2024-01-01T00:00:00 -max 2025-01-01T00:00:00 -o /tmp/recovery.json -log ./recovery.log -sz 400 &
+# nohup ./recovery-logs-from-wazuh.py -eps 10000 -min 2024-01-01T00:00:00 -max 2025-01-01T00:00:00 -o /tmp/recovery.json -log ./recovery.log -sz 400 &
 
 import gzip
 import time
@@ -117,7 +117,7 @@ while current_time <= max_time:
                 event_date = datetime.strptime(string_timestamp, '%Y-%m-%dT%H:%M:%S')
 
                 # Check the timestamp belongs to the selected range
-                if (event_date <= max_timestamp and event_date >= min_timestamp and line_json and 'data' in line_json and 'win' in line_json['data'] and 'eventInfo' in line_json['data']['win'] and 'resource' in line_json['data']['win']['eventInfo'] and line_json['data']['win']['eventInfo']['resource'] == "prdepyadv@gmail.com"):
+                if (event_date <= max_timestamp and event_date >= min_timestamp and line_json and 'data' in line_json and 'win' in line_json['data'] and 'eventInfo' in line_json['data']['win'] and 'resource' in line_json['data']['win']['eventInfo'] and line_json['data']['win']['eventInfo']['resource'] == "test@mail.com"):
                     chunk+=1
                     trimmed_alerts.write(json.dumps(line_json))
                     trimmed_alerts.write("\n")
