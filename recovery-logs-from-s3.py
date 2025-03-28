@@ -13,13 +13,19 @@ import boto3
 import botocore
 from botocore.exceptions import ClientError
 
+# Ensure f_log is defined globally to avoid "possibly unbound" errors.
+f_log = None
+
 def log(msg):
     now_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     final_msg = f"{now_date} wazuh-reinjection: {msg}"
     print(final_msg)
-    if log_file:
-        f_log.write(final_msg + "\n")
-
+    if f_log:
+        try:
+            f_log.write(final_msg + "\n")
+            f_log.flush()
+        except Exception as e:
+            print(f"Error writing to log file: {e}")
 
 month_dict = ['Null','Jan','Feb','Mar','Apr','May','Jun',
               'Jul','Aug','Sep','Oct','Nov','Dec']
@@ -50,7 +56,11 @@ args = parser.parse_args()
 log_file = None
 if args.log_file:
     log_file = args.log_file
-    f_log = open(log_file, 'a+')
+    try:
+        f_log = open(log_file, 'a+')
+    except Exception as e:
+        print(f"Error opening log file {args.log_file}: {e}")
+        log_file = None
 
 EPS_MAX = args.eps
 if EPS_MAX <= 0:
@@ -76,53 +86,60 @@ except ValueError:
     exit(1)
 
 session = boto3.Session(profile_name=args.aws_profile)
-#s3 = session.resource('s3', endpoint_url=args.s3_endpoint)
 s3_client = session.client('s3', endpoint_url=args.s3_endpoint)
 BUCKET_NAME = args.bucket
 
 current_time = datetime(min_timestamp.year, min_timestamp.month, min_timestamp.day)
 end_time     = datetime(max_timestamp.year, max_timestamp.month, max_timestamp.day)
 
-output_file   = args.output_file
-trimmed_alerts = open(output_file, 'w')
+output_file = args.output_file
+try:
+    trimmed_alerts = open(output_file, 'w')
+except Exception as e:
+    log(f"Error opening output file {output_file}: {e}")
+    exit(1)
 
 chunk = 0
 while current_time <= end_time:
-    # Build the path in your bucket. Example:
-    #  s3://bucket-name/2024/Jan/ossec-archive-01.json.gz
-    #
-    # If your actual structure is different (e.g. 2024/01 or 2024/01/ossec-archive-2024-01-01.json.gz),
-    # adjust accordingly.
+    # Build the path in your bucket.
     year_str  = str(current_time.year)            # "2024"
-    month_str = month_dict[current_time.month]    # "Jan", "Feb", etc.
-    day_str   = f"{current_time.day:02d}"         # "01", "02", etc.
-
+    month_str = month_dict[current_time.month]      # "Jan", "Feb", etc.
+    day_str   = f"{current_time.day:02d}"            # "01", "02", etc.
     object_key = f"{year_str}/{month_str}/ossec-archive-{day_str}.json.gz"
 
     log(f"Checking for: s3://{BUCKET_NAME}/{object_key}")
     try:
         s3_client.head_object(Bucket=BUCKET_NAME, Key=object_key)
     except ClientError as e:
-        if e.response['Error']['Code'] == '404' or e.response['Error']['Code'] == 'NoSuchKey':
+        error_code = e.response.get('Error', {}).get('Code', '')
+        if error_code in ['404', 'NoSuchKey']:
             log(f"File not found in S3: {object_key}")
         else:
             log(f"Error accessing {object_key}: {str(e)}")
         current_time += timedelta(days=1)
         continue
+    except Exception as e:
+        log(f"Unexpected error during head_object for {object_key}: {e}")
+        current_time += timedelta(days=1)
+        continue
 
     try:
         get_resp = s3_client.get_object(Bucket=BUCKET_NAME, Key=object_key)
+        log(f"Reading file from S3: {object_key}")
+        file_content = get_resp['Body'].read()
+        decompressed_content = gzip.decompress(file_content)
     except ClientError as e:
         log(f"Error downloading {object_key}: {str(e)}")
         current_time += timedelta(days=1)
         continue
+    except Exception as e:
+        log(f"Error processing file {object_key}: {e}")
+        current_time += timedelta(days=1)
+        continue
 
     daily_alerts = 0
-    compressed_alerts = gzip.GzipFile(fileobj=get_resp['Body'])
-    log(f"Reading file from S3: {object_key}")
-
-    with compressed_alerts:
-        for line in compressed_alerts:
+    try:
+        for line in decompressed_content.splitlines():
             try:
                 line_json = json.loads(line.decode("utf-8", "replace"))
 
@@ -136,29 +153,50 @@ while current_time <= end_time:
                 # Get the timestamp readable
                 event_date = datetime.strptime(string_timestamp, '%Y-%m-%dT%H:%M:%S')
 
-                # Check the timestamp belongs to the selected range
-                if (event_date <= max_timestamp and event_date >= min_timestamp and line_json and 'data' in line_json and 'win' in line_json['data'] and 'eventInfo' in line_json['data']['win'] and 'resource' in line_json['data']['win']['eventInfo'] and line_json['data']['win']['eventInfo']['resource'] == "test@mail.com"):
-                    chunk+=1
-                    trimmed_alerts.write(json.dumps(line_json))
-                    trimmed_alerts.write("\n")
-                    trimmed_alerts.flush()
+                # Check the timestamp belongs to the selected range and the event matches our criteria
+                if (event_date <= max_timestamp and event_date >= min_timestamp and 
+                    line_json and 'data' in line_json and 'win' in line_json['data'] and 
+                    'eventInfo' in line_json['data']['win'] and 'resource' in line_json['data']['win']['eventInfo'] and 
+                    line_json['data']['win']['eventInfo']['resource'] == "test@mail.com" and 
+                    'system' in line_json['data']['win'] and 'eventID' in line_json['data']['win']['system'] and 
+                    line_json['data']['win']['system']['eventID'] in [302, 303]):
+                    
+                    chunk += 1
+                    try:
+                        trimmed_alerts.write(json.dumps(line_json) + "\n")
+                        trimmed_alerts.flush()
+                    except Exception as e:
+                        log(f"Error writing to output file: {e}")
+                    
                     daily_alerts += 1
                     if chunk >= EPS_MAX:
                         chunk = 0
                         time.sleep(2)
-                    if os.path.getsize(output_file) >= max_bytes:
-                        trimmed_alerts.close()
-                        log("Output file reached max size, setting it to zero and restarting")
-                        time.sleep(EPS_MAX/100)
-                        trimmed_alerts = open(output_file, 'w')
-
+                    try:
+                        if os.path.getsize(output_file) >= max_bytes:
+                            trimmed_alerts.close()
+                            log("Output file reached max size, setting it to zero and restarting")
+                            time.sleep(EPS_MAX/100)
+                            trimmed_alerts = open(output_file, 'w')
+                    except Exception as e:
+                        log(f"Error checking/rotating output file size: {e}")
             except ValueError as e:
-                print("Oops! Something went wrong reading: {}".format(line))
-                print("This is the error: {}".format(str(e)))
+                log(f"Error processing line: {line}. Error: {e}")
+            except Exception as e:
+                log(f"Unexpected error processing line: {line}. Error: {e}")
+    except Exception as e:
+        log(f"Error processing decompressed content from {object_key}: {e}")
 
-        compressed_alerts.close()
-        log("Extracted {0} alerts from day {1}-{2}-{3}".format(daily_alerts,current_time.day,month_dict[current_time.month],current_time.year))
-
+    log("Extracted {0} alerts from day {1}-{2}-{3}".format(daily_alerts, current_time.day, month_dict[current_time.month], current_time.year))
     current_time += timedelta(days=1)
 
-trimmed_alerts.close()
+try:
+    trimmed_alerts.close()
+except Exception as e:
+    log(f"Error closing output file: {e}")
+
+if f_log:
+    try:
+        f_log.close()
+    except Exception as e:
+        print(f"Error closing log file: {e}")
